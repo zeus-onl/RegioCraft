@@ -265,9 +265,9 @@ def _materialize_delta_fn(entry, dev, cdt):
 DEFAULT_REGIONS_JSON = (
     "[\n"
     '  {"lora": "None", "strength": 1.2, "enable": true, "ref_image": "",'
-    ' "x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0},\n'
+    ' "prompt": "", "trigger": "", "x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0},\n'
     '  {"lora": "None", "strength": 1.2, "enable": true, "ref_image": "",'
-    ' "x": 0.5, "y": 0.0, "w": 0.5, "h": 1.0}\n'
+    ' "prompt": "", "trigger": "", "x": 0.5, "y": 0.0, "w": 0.5, "h": 1.0}\n'
     "]"
 )
 
@@ -304,6 +304,8 @@ def _parse_regions(regions_json):
             "strength": float(r.get("strength", 1.0)),
             "enable": bool(r.get("enable", True)),
             "ref_image": str(r.get("ref_image", "") or "").strip(),
+            "prompt": str(r.get("prompt", "") or "").strip(),
+            "trigger": str(r.get("trigger", "") or "").strip(),
             "box": (max(0.0, min(1.0, bx)), max(0.0, min(1.0, by)),
                     max(0.0, min(1.0, bx + bw)), max(0.0, min(1.0, by + bh))),
         })
@@ -702,6 +704,54 @@ def _rect_token_mask_pixel(H, W, nx0, ny0, nx1, ny1, feather):
 
 
 # ============================================================================
+# per-region text conditioning (named-character style prompting, Gorecheese/
+# Fedor idea): each region can carry its own text alongside its LoRA. The
+# base_prompt is encoded once as a full-image (unmasked) conditioning so
+# overall scene/composition still comes from the main prompt; each region
+# with its own text gets ADDITIONALLY encoded (base + ", " + region text) and
+# masked to that region's box via ComfyUI's standard area-conditioning fields
+# (mask / mask_strength / set_area_to_bounds) -- the same mechanism the
+# built-in ConditioningSetMask node uses, so it works with any KSampler and
+# any model, not just Krea2.
+# ============================================================================
+def _encode_text(clip, text):
+    tokens = clip.tokenize(text or "")
+    cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
+    return [[cond, {"pooled_output": pooled}]]
+
+
+def _mask_conditioning(cond_list, mask, strength=1.0):
+    m = mask.unsqueeze(0) if mask.dim() == 2 else mask
+    out = []
+    for c, extra in cond_list:
+        n_extra = extra.copy()
+        n_extra["mask"] = m
+        n_extra["set_area_to_bounds"] = False
+        n_extra["mask_strength"] = float(strength)
+        out.append([c, n_extra])
+    return out
+
+
+def _build_region_conditioning(clip, base_prompt, prepared_regions, norm_boxes,
+                                cw, ch, text_strength):
+    """Whole-image base conditioning + one masked regional conditioning per
+    region that has its own prompt text. Regions without text contribute
+    nothing here -- their identity comes purely from the LoRA/LoKr masking."""
+    base_prompt = base_prompt or ""
+    combined = _encode_text(clip, base_prompt)
+    for r, box in zip(prepared_regions, norm_boxes):
+        text = r.get("prompt", "")
+        if not text:
+            continue
+        full_text = f"{base_prompt}, {text}" if base_prompt else text
+        region_cond = _encode_text(clip, full_text)
+        x0, y0, x1, y1 = box
+        mask = _rect_token_mask_pixel(ch, cw, x0, y0, x1, y1, 0.02)
+        combined += _mask_conditioning(region_cond, mask, text_strength)
+    return combined
+
+
+# ============================================================================
 # the node
 # ============================================================================
 class RegioCraft:
@@ -716,9 +766,26 @@ class RegioCraft:
                 "regions_json": ("STRING", {
                     "multiline": True, "default": DEFAULT_REGIONS_JSON,
                     "tooltip": 'JSON array, in box order: {"lora":"file.safetensors",'
-                               ' "strength":1.2, "enable":true, "ref_image":"uploaded.png"}. '
+                               ' "strength":1.2, "enable":true, "ref_image":"uploaded.png",'
+                               ' "prompt":"optional per-region text"}. '
                                "Unlimited rows. LoRA and LoKr files both work.",
                 }),
+                "base_prompt": ("STRING", {
+                    "multiline": True, "default": "",
+                    "tooltip": "Overall scene prompt (composition, setting, lighting). "
+                               "Combined with each region's own text (if any) for that "
+                               "region's masked conditioning. Also scanned for trigger "
+                               "names if auto_activate_from_prompt is on.",
+                }),
+                "text_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
+                    "tooltip": "Blend strength of each region's masked text conditioning."}),
+                "auto_activate_from_prompt": ("BOOLEAN", {"default": False,
+                    "tooltip": "If a region has a 'trigger' name set, that region is only "
+                               "active when its trigger word appears (case-insensitive) in "
+                               "base_prompt -- the region's own enable toggle is ignored in "
+                               "that case. Regions with no trigger set keep using their "
+                               "enable toggle as normal (handy for LoRAs that don't need a "
+                               "trigger word to activate)."}),
                 "split_mode": (["manual", "bbox", "auto_vertical", "auto_horizontal"], {"default": "manual"}),
                 "seam_feather": ("FLOAT", {"default": 0.08, "min": 0.0, "max": 0.5, "step": 0.01}),
                 "blend_override": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05}),
@@ -743,18 +810,19 @@ class RegioCraft:
             },
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP", "IMAGE", "STRING")
-    RETURN_NAMES = ("model", "clip", "mask_preview", "info")
+    RETURN_TYPES = ("MODEL", "CLIP", "IMAGE", "STRING", "CONDITIONING")
+    RETURN_NAMES = ("model", "clip", "mask_preview", "info", "conditioning")
     FUNCTION = "apply"
     CATEGORY = "RegioCraft"
     DESCRIPTION = ("RegioCraft: unlimited-region character LoRA/LoKr masking, sparse-token "
-                   "hook, ramp/warmup scheduling, attention isolation and reference-image "
-                   "identity lock, all in one node.")
+                   "hook, ramp/warmup scheduling, attention isolation, reference-image "
+                   "identity lock, and optional per-region text conditioning, all in one node.")
 
     def apply(self, model, clip, canvas_width, canvas_height, regions_json, split_mode,
               seam_feather, blend_override, sparse_threshold, steps_without_applying,
               lora_ramp_calls, attention_isolation, ref_strength, ref_start_percent,
-              ref_end_percent, ref_feather, bboxes=None, vae=None, base_strength=1.0):
+              ref_end_percent, ref_feather, base_prompt="", text_strength=1.0,
+              auto_activate_from_prompt=False, bboxes=None, vae=None, base_strength=1.0):
 
         regions = _parse_regions(regions_json)
         cw, ch = int(canvas_width), int(canvas_height)
@@ -765,11 +833,23 @@ class RegioCraft:
         def has_ref(r):
             return bool(r["ref_image"])
 
-        active = [r for r in regions if r["enable"] and (has_lora(r) or has_ref(r))]
+        def is_enabled(r):
+            # A region with a trigger name is auto-activated purely by whether
+            # that word appears in base_prompt when auto_activate is on -- its
+            # own enable toggle is ignored in that case (Gorecheese's "named
+            # character" idea). Regions without a trigger (many LoRAs need no
+            # trigger word at all) keep working exactly as before: the manual
+            # enable toggle decides.
+            if auto_activate_from_prompt and r["trigger"]:
+                return r["trigger"].lower() in (base_prompt or "").lower()
+            return r["enable"]
+
+        active = [r for r in regions if is_enabled(r) and (has_lora(r) or has_ref(r) or r["prompt"])]
         if not active:
             logging.warning("[RegioCraft] no active regions; passing model through unchanged.")
             blank = torch.zeros((1, 64, 64, 3))
-            return (model, clip, blank, "RegioCraft: no active regions.")
+            base_cond = _encode_text(clip, base_prompt)
+            return (model, clip, blank, "RegioCraft: no active regions.", base_cond)
 
         if split_mode == "manual":
             # boxes come from the in-node visual editor, stored per-region
@@ -803,7 +883,8 @@ class RegioCraft:
                     logging.warning("[RegioCraft] '%s' matched 0 LoRA/LoKr layers.", r["lora"])
             prepared_regions.append({"name": r["name"], "lora_path": r["lora"],
                                      "strength": r["strength"], "mats": mats,
-                                     "ref_image": r["ref_image"]})
+                                     "ref_image": r["ref_image"], "prompt": r["prompt"],
+                                     "trigger": r["trigger"]})
 
         patched = model.clone()
         session = _RegioCraftSession(
@@ -891,7 +972,11 @@ class RegioCraft:
 
         logging.info("[RegioCraft] armed %d region(s), %d with reference lock.",
                      len(active), len(ref_entries))
-        return (patched, clip, preview, info)
+
+        region_conditioning = _build_region_conditioning(
+            clip, base_prompt, prepared_regions, norm_boxes, cw, ch, text_strength)
+
+        return (patched, clip, preview, info, region_conditioning)
 
 
 def _hsv_to_rgb(h, s, v):

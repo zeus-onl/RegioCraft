@@ -9,12 +9,6 @@
 // 0-1); the per-row widgets are the source of truth for lora/strength/enable/
 // ref_image. Both write into the same "regions_json" array so the Python
 // node's "manual" split_mode can read x/y/w/h straight off each region.
-//
-// Credits: this editor merges UI work from Fedor's Krea2-Multi-Character-
-// Lora-Node-w-bounding-box (per-row lora/strength/ref widgets, ref-image
-// upload+thumbnail) and Shy's fork of Gorecheese's original
-// regional_character_lora (the draggable box canvas, the "load latest
-// output as background" workflow). Thanks to all three.
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
@@ -93,6 +87,8 @@ function defaultRegion(i, n) {
     strength: 1.2,
     enable: true,
     ref_image: "",
+    prompt: "",
+    trigger: "",
     x: i / cols, y: 0.0, w: 1.0 / cols, h: 1.0,
   };
 }
@@ -269,7 +265,7 @@ function makeRefWidget(node, idx, region) {
 }
 
 // ---------------------------------------------------------------------------
-// per-region control rows (enable / lora / strength / ref / remove)
+// per-region control rows (enable / lora / strength / prompt / trigger / ref / remove)
 // ---------------------------------------------------------------------------
 function rebuildRows(node) {
   if (node.widgets) {
@@ -299,6 +295,18 @@ function rebuildRows(node) {
       { min: -10.0, max: 10.0, step: 0.1, precision: 2 }
     );
     markTransient(strW);
+
+    const promptW = node.addWidget(
+      "text", `region ${idx + 1} prompt (optional)`, region.prompt || "",
+      (v) => { const r = readRegions(node); if (r[idx]) { r[idx].prompt = v; writeRegions(node, r); } }
+    );
+    markTransient(promptW);
+
+    const triggerW = node.addWidget(
+      "text", `region ${idx + 1} trigger name (optional)`, region.trigger || "",
+      (v) => { const r = readRegions(node); if (r[idx]) { r[idx].trigger = v; writeRegions(node, r); } node.setDirtyCanvas(true, true); }
+    );
+    markTransient(triggerW);
 
     if (node.addCustomWidget) node.addCustomWidget(makeRefWidget(node, idx, region));
     else node.widgets.push(makeRefWidget(node, idx, region));
