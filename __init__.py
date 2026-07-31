@@ -807,6 +807,19 @@ class RegioCraft:
                 "bboxes": ("BOUNDING_BOX",),
                 "vae": ("VAE", {"tooltip": "Required to enable reference-image regions."}),
                 "base_strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.05}),
+                "region_prompt_1": ("STRING", {"forceInput": True, "multiline": True,
+                    "tooltip": "Connect an external text node here to drive region 1's prompt "
+                               "dynamically (e.g. a wildcard/random prompt generator). Overrides "
+                               "whatever's typed into region 1's own prompt field when connected."}),
+                "region_prompt_2": ("STRING", {"forceInput": True, "multiline": True}),
+                "region_prompt_3": ("STRING", {"forceInput": True, "multiline": True}),
+                "region_prompt_4": ("STRING", {"forceInput": True, "multiline": True}),
+                "region_prompt_5": ("STRING", {"forceInput": True, "multiline": True}),
+                "region_prompt_6": ("STRING", {"forceInput": True, "multiline": True}),
+                "region_prompt_7": ("STRING", {"forceInput": True, "multiline": True}),
+                "region_prompt_8": ("STRING", {"forceInput": True, "multiline": True,
+                    "tooltip": "Region 9+ have no dedicated input socket (fixed cap of 8) -- "
+                               "type their prompts directly into each region's own prompt field."}),
             },
         }
 
@@ -822,10 +835,20 @@ class RegioCraft:
               seam_feather, blend_override, sparse_threshold, steps_without_applying,
               lora_ramp_calls, attention_isolation, ref_strength, ref_start_percent,
               ref_end_percent, ref_feather, base_prompt="", text_strength=1.0,
-              auto_activate_from_prompt=False, bboxes=None, vae=None, base_strength=1.0):
+              auto_activate_from_prompt=False, bboxes=None, vae=None, base_strength=1.0,
+              **kwargs):
 
         regions = _parse_regions(regions_json)
         cw, ch = int(canvas_width), int(canvas_height)
+
+        # Connected region_prompt_N inputs (N = 1-based position in the JSON /
+        # canvas, matching the "region N" labels) override that region's typed-
+        # in prompt text. A region with a live prompt connection but no LoRA and
+        # no manually-typed text still counts (text alone is a valid region).
+        for i, r in enumerate(regions):
+            connected = kwargs.get(f"region_prompt_{i + 1}")
+            if connected:
+                r["prompt"] = connected
 
         def has_lora(r):
             return r["lora"] not in ("None", "") and (r["strength"] * base_strength) != 0.0

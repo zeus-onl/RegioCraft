@@ -265,9 +265,52 @@ function makeRefWidget(node, idx, region) {
 }
 
 // ---------------------------------------------------------------------------
-// per-region control rows (enable / lora / strength / prompt / trigger / ref / remove)
+// dynamic region_prompt_N input sockets -- count always matches the number
+// of regions currently on the canvas (capped at MAX_PROMPT_INPUTS, matching
+// the fixed set Python declares in INPUT_TYPES). New sockets appear as you
+// add regions, and disappear (auto-disconnecting any wire) as you remove
+// them -- same spirit as ClownsharkSampler's growing optionsN inputs, just
+// driven by region count instead of "is the last one connected".
+//
+// These sockets always render in the node's top input column (LiteGraph
+// draws all inputs before any widgets, never interleaved) -- there's no
+// safe way to place a socket next to a specific region's row lower in the
+// body without fully custom-drawing the node ourselves, which is exactly
+// the pattern that broke KoO Resolution Next / Resolution Master under
+// Nodes 2.0. Not worth that risk here.
+// ---------------------------------------------------------------------------
+const MAX_PROMPT_INPUTS = 8;
+
+function syncPromptInputs(node) {
+  const regions = readRegions(node);
+  const wanted = Math.min(MAX_PROMPT_INPUTS, regions.length);
+  const isPromptInput = (inp) => /^region_prompt_\d+$/.test(inp?.name || "");
+
+  const currentNames = (node.inputs || []).filter(isPromptInput).map((i) => i.name);
+  let current = currentNames.length;
+
+  while (current > wanted) {
+    const name = `region_prompt_${current}`;
+    const idx = node.inputs.findIndex((inp) => inp.name === name);
+    if (idx === -1) break;
+    node.removeInput(idx); // also disconnects any wire on it, as expected
+    current--;
+  }
+  while (current < wanted) {
+    current++;
+    const name = `region_prompt_${current}`;
+    if (!node.inputs.some((inp) => inp.name === name)) {
+      node.addInput(name, "STRING");
+    }
+  }
+  node.setDirtyCanvas(true, true);
+}
+
+// ---------------------------------------------------------------------------
+// per-region control rows (enable / lora / strength / ref / remove)
 // ---------------------------------------------------------------------------
 function rebuildRows(node) {
+  syncPromptInputs(node);
   if (node.widgets) {
     node.widgets = node.widgets.filter((w) => !w.__rc_row);
   }
@@ -604,15 +647,20 @@ app.registerExtension({
       const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
       const node = this;
 
-      // seed the hidden regions_json widget if it's empty/default
+      // Seed the hidden regions_json widget ONLY when it's truly absent
+      // (a genuinely brand-new node). Do NOT overwrite it just because it
+      // fails to parse or parses to an empty array -- that state can also
+      // happen transiently during ComfyUI's multi-tab canvas restore, where
+      // this fires again on an existing node before its real widget value
+      // has been fully written back in. Overwriting there silently wipes
+      // out real region data (reported: LoRAs/triggers/prompts vanishing
+      // when switching between tabs). readRegions()/rebuildRows() already
+      // treat unparsable or empty JSON as "no regions yet" for rendering,
+      // so leaving a suspicious value untouched doesn't break the UI -- it
+      // just avoids ever destroying data we're not 100% sure is actually gone.
       const jw = node.widgets?.find((w) => w.name === JSON_WIDGET);
-      if (jw) {
-        try {
-          const parsed = JSON.parse(jw.value || "[]");
-          if (!Array.isArray(parsed) || !parsed.length) jw.value = JSON.stringify(defaultRegions());
-        } catch (e) {
-          jw.value = JSON.stringify(defaultRegions());
-        }
+      if (jw && (jw.value === undefined || jw.value === null || jw.value === "")) {
+        jw.value = JSON.stringify(defaultRegions());
       }
 
       buildCanvasWidget(node);

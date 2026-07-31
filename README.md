@@ -55,6 +55,7 @@ Character LoRAs go into RegioCraft's own region rows, not into a global LoRA sta
 - **`base_prompt`** (top of the node): the overall scene description — composition, setting, lighting. Combined with each region's own text (if any) and masked to that region for the `conditioning` output. Also scanned for trigger names if `auto_activate_from_prompt` is on.
 - **`auto_activate_from_prompt`**: off by default. When on, any region with a `trigger` name set is switched on/off purely by whether that name appears in `base_prompt` — its own enable toggle is ignored. Regions with no trigger keep using their manual toggle regardless.
 - **"↻ Load latest output"** pulls your last generated image into the editor as a background so you can line boxes up precisely on where faces actually landed; **"auto after each run"** does this automatically after every generation.
+- **Dynamic `region_prompt_N` inputs** — real, connectable STRING sockets (up to 8) that appear automatically above the node, one per region currently drawn on the canvas. Wire an external node (a wildcard prompt generator, a character-clothes generator, whatever) into `region_prompt_1` and it overrides that region's typed-in prompt field live. Add or remove a region and the matching socket appears/disappears (auto-disconnecting) to match. For text that's fine applying to the whole scene rather than one character's box specifically, a simpler option is a `Text Concatenate`-style node feeding `base_prompt` directly -- no per-region socket needed for that case.
 - `split_mode`: `manual` (the boxes you draw, default) / `bbox` (wire in an external `BOUNDING_BOX` source) / `auto_vertical` / `auto_horizontal` (equal strips, no boxes needed). The little "BoundingBox: Node 2.0 only" hint some ComfyUI frontends show next to the `bboxes` input is just a cosmetic frontend note about a newer node schema RegioCraft doesn't use — it's inert, ignore it, and it never affects anything as long as you're on `split_mode = manual`.
 - `seam_feather`: softness of the border between regions.
 - `blend_override`: `0` = clean regional split (recommended); raising it lets regions bleed toward a shared average.
@@ -76,6 +77,33 @@ The box marks **where the LoRA is injected**, not just "where the character is."
 **One character is right, the other generic** — the box for that region probably doesn't cover its face; drag the box, not the LoRA — a region's identity always follows wherever its box currently sits, so if the wrong face is getting the wrong LoRA, just move the box, don't try to reorder anything.
 
 **"Failed to validate prompt" errors after updating RegioCraft (values landing in the wrong fields, e.g. a float where a dropdown choice was expected)** — this happens when RegioCraft's input fields were reordered/added in an update and an *existing* node instance on your canvas still holds its old, position-based saved values. ComfyUI stores widget values positionally per node instance, not by name, so a field-order change can shuffle a stale instance's values into the wrong slots. Fix: delete the old RegioCraft node from your workflow and drag in a fresh one, then rewire it. This is a one-time inconvenience per update that touches the field order, not a bug in a given run.
+
+## Changelog
+
+**Core merge (initial release)**
+- Merged three parent nodes into one: activation-delta LoRA/LoKr masking engine (Gorecheese), sparse-token hook + Attention Isolation + ramp/warmup scheduling (Shy), unlimited regions + LoKr support + Reference Lock (Fedor)
+- fp8-safe LoRA/LoKr injection via forward hooks, no weight merging
+
+**Visual editor**
+- In-node canvas: draw/drag/resize boxes directly on the node, rainbow-coded per region
+- Per-region control rows: enable toggle, LoRA dropdown, strength, reference image upload with thumbnail preview
+- "+ Add Region" button, unlimited regions (not capped at 2)
+- "↻ Load latest output" + "auto after each run" -- pulls the last generation into the canvas as a background reference for precise box placement
+- Drag-and-drop image support directly onto the canvas
+
+**Per-region text conditioning**
+- `base_prompt` input (overall scene prompt, masked-conditioning base)
+- `text_strength` control for the masked regional conditioning blend
+- New `conditioning` output -- combines base + per-region masked text via ComfyUI's standard area-conditioning mechanism (architecture-agnostic)
+- Per-region `prompt` field (optional per-character text)
+- Per-region `trigger` field + `auto_activate_from_prompt` toggle -- a region auto-enables when its trigger name appears in `base_prompt`
+
+**Bug fixes**
+- Fixed: region data (LoRAs, triggers, prompts) could silently vanish when switching between ComfyUI tabs. The JSON-seeding logic now only resets to defaults when the stored value is truly absent (`undefined`/`null`/`""`), never just because it fails to parse or looks empty -- that state can also happen transiently during multi-tab canvas restore
+
+**Dedicated per-region prompt inputs**
+- Added `region_prompt_1` through `region_prompt_8` -- real, connectable STRING inputs (fixed cap of 8) that override a region's typed-in prompt when wired to an external node (e.g. a wildcard/character generator)
+- Socket count now auto-syncs to the number of regions actually drawn on the canvas (2 regions = 2 visible sockets, add a 3rd -> `region_prompt_3` appears automatically, remove a region -> its socket disappears and auto-disconnects)
 
 ## Credits
 
