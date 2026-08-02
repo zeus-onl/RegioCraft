@@ -1,0 +1,21 @@
+# .github/workflows/release-announce.yml
+on:
+  release:
+    types: [published]
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post to Discord
+        run: |
+          curl -X POST ${{ secrets.DISCORD_WEBHOOK }} \
+            -H "Content-Type: application/json" \
+            -d '{"content": "🔧 New release: ${{ github.event.release.name }}"}'
+      
+      - name: Post to WordPress
+        run: |
+          curl -X POST https://zeus.onl/wp-json/wp/v2/posts \
+            -u "${{ secrets.WP_USER }}:${{ secrets.WP_APP_PASSWORD }}" \
+            -H "Content-Type: application/json" \
+            -d '{"title": "${{ github.event.release.name }}", "content": "${{ github.event.release.body }}", "status": "publish"}'
