@@ -68,7 +68,7 @@ This is the mode you see in your test workflow: feed in a reference image, descr
 
 **Requirements for `identity_provider = krea2edit`:**
 - The separate custom node **`comfyui-krea2edit`** must be installed (`ComfyUI/custom_nodes/comfyui-krea2edit`)
-- The **`krea2_identity_edit` LoRA** must be present and loaded
+- The **[`krea2_identity_edit` LoRA](https://civitai.com/models/2761113/krea-2-identity-edit)** must be present and loaded
 - A **VAE** must be connected to the RegioCraft node (without it, the identity path stays disabled and RegioCraft falls back to normal forward automatically)
 - Maximum **2 simultaneous reference images** (scene + subject) — that's the LoRA's own trained limit, not a RegioCraft restriction. Extra active reference regions beyond that are logged and ignored, not an error.
 

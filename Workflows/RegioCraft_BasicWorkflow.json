@@ -1,7 +1,7 @@
 {
-  "id": "regiocraft-identity-provider-v2-test",
+  "id": "0fdc0926-f405-4f57-84ee-3a3129996c10",
   "revision": 0,
-  "last_node_id": 106,
+  "last_node_id": 111,
   "last_link_id": 35,
   "nodes": [
     {
@@ -16,7 +16,7 @@
         120
       ],
       "flags": {},
-      "order": 8,
+      "order": 11,
       "mode": 0,
       "inputs": [
         {
@@ -63,7 +63,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 10,
+      "order": 13,
       "mode": 0,
       "inputs": [
         {
@@ -110,7 +110,7 @@
         500
       ],
       "flags": {},
-      "order": 11,
+      "order": 14,
       "mode": 0,
       "inputs": [
         {
@@ -234,7 +234,7 @@
         826.5564174107143
       ],
       "flags": {},
-      "order": 9,
+      "order": 12,
       "mode": 0,
       "inputs": [
         {
@@ -300,7 +300,7 @@
         100
       ],
       "flags": {},
-      "order": 6,
+      "order": 9,
       "mode": 0,
       "inputs": [
         {
@@ -375,51 +375,6 @@
       ]
     },
     {
-      "id": 104,
-      "type": "LoraLoaderModelOnly",
-      "pos": [
-        0,
-        363.3880199439935
-      ],
-      "size": [
-        420,
-        82
-      ],
-      "flags": {},
-      "order": 4,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 25
-        }
-      ],
-      "outputs": [
-        {
-          "name": "MODEL",
-          "type": "MODEL",
-          "links": [
-            26
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.29.0",
-        "Node name for S&R": "LoraLoaderModelOnly",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        "F2K\\DS\\cfk201.safetensors",
-        0.85
-      ]
-    },
-    {
       "id": 105,
       "type": "EmptyLatentImage",
       "pos": [
@@ -431,7 +386,7 @@
         106
       ],
       "flags": {},
-      "order": 5,
+      "order": 8,
       "mode": 0,
       "inputs": [
         {
@@ -629,6 +584,109 @@
       ]
     },
     {
+      "id": 108,
+      "type": "Note",
+      "pos": [
+        -452.36640774829976,
+        211.72351258309237
+      ],
+      "size": [
+        446.07433769451666,
+        88
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "Download the Missing Lora here : https://civitai.com/models/2761113/krea-2-identity-edit"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 104,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        0,
+        363.3880199439935
+      ],
+      "size": [
+        420,
+        82
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 25
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            26
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.29.0",
+        "Node name for S&R": "LoraLoaderModelOnly",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        "F2K\\Krea2-realism-V1.safetensors",
+        0.85
+      ]
+    },
+    {
+      "id": 110,
+      "type": "Note",
+      "pos": [
+        -452.36640774829976,
+        363.3880199439935
+      ],
+      "size": [
+        446.07433769451666,
+        88
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "Download the Missing Lora here : https://civitai.red/models/2728365/krea2-realism-v1-or-v2"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
       "id": 106,
       "type": "RegioCraft",
       "pos": [
@@ -640,7 +698,7 @@
         2100.6491359879788
       ],
       "flags": {},
-      "order": 7,
+      "order": 10,
       "mode": 0,
       "inputs": [
         {
@@ -661,12 +719,6 @@
         },
         {
           "name": "region_prompt_1",
-          "shape": 7,
-          "type": "STRING",
-          "link": null
-        },
-        {
-          "name": "region_prompt_2",
           "shape": 7,
           "type": "STRING",
           "link": null
@@ -707,16 +759,17 @@
       ],
       "title": "8. RegioCraft -- identity_provider=krea2edit (Phase 3, KEIN Krea2EditModelPatch mehr noetig!)",
       "properties": {
+        "Node name for S&R": "RegioCraft",
         "ue_properties": {
           "widget_ue_connectable": {},
-          "input_ue_unconnectable": {}
-        },
-        "Node name for S&R": "RegioCraft"
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
       },
       "widgets_values": [
         1024,
         1024,
-        "[\n  {\n    \"lora\": \"None\",\n    \"strength\": 0.9999999999999998,\n    \"enable\": true,\n    \"ref_image\": \"\",\n    \"prompt\": \"\",\n    \"trigger\": \"\",\n    \"x\": 0.17241049600740838,\n    \"y\": 0,\n    \"w\": 0.655251112268767,\n    \"h\": 1\n  },\n  {\n    \"name\": \"region_1\",\n    \"lora\": \"F2K\\\\Char\\\\bloomgirls-ultrarealism-krea2_4k.safetensors\",\n    \"strength\": 0.9999999999999998,\n    \"enable\": true,\n    \"ref_image\": \"\",\n    \"prompt\": \"\",\n    \"trigger\": \"\",\n    \"x\": 0.3555647674661706,\n    \"y\": 0.10422266343983139,\n    \"w\": 0.33738958793756046,\n    \"h\": 0.3794069799075365\n  }\n]",
+        "[\n  {\n    \"lora\": \"None\",\n    \"strength\": 0.9999999999999998,\n    \"enable\": true,\n    \"ref_image\": \"\",\n    \"prompt\": \"\",\n    \"trigger\": \"\",\n    \"x\": 0.17241049600740838,\n    \"y\": 0,\n    \"w\": 0.655251112268767,\n    \"h\": 1\n  }\n]",
         "{\n  \"image_generation\": {\n    \"face_preservation\": {\n      \"use_reference_face_only\": true,\n      \"preserve_original\": true,\n      \"accuracy\": \"100% identical facial features, skin texture, expression and proportions\"\n    },\n\n    \"subject\": {\n      \"gender\": \"female\",\n      \"pose\": {\n        \"description\": \"sitting sideways on a wooden beach café chair, one arm resting on the chair’s backrest while the other gently touches her cheek; relaxed and natural posture with shoulders slightly turned toward the camera\"\n      },\n      \"expression\": \"soft playful smile, eyes looking slightly to the side as if reacting to someone calling her name\",\n      \"hairstyle\": \"wet, slicked-back hair, naturally wavy and tucked behind ears\",\n      \"clothing\": {\n        \"top\": \"white semi-sheer long-sleeve beach shirt\",\n        \"bottom\": \"white shorts\",\n        \"accessories\": [\n          \"small gold hoop earrings\",\n          \"thin bracelet on right wrist\",\n          \"light pink/coral nail polish\"\n        ]\n      }\n    },\n\n    \"environment\": {\n      \"setting\": \"beachside restaurant or café\",\n      \"background_elements\": [\n        \"wooden ceiling with woven lampshades\",\n        \"soft golden ambient lights\",\n        \"sunlit summery atmosphere\",\n        \"people relaxing and dining in the background\",\n        \"warm wooden textures\"\n      ],\n      \"lighting\": {\n        \"type\": \"natural daylight with warm indoor accents\",\n        \"tone\": \"sunlit, warm, summery\",\n        \"highlights\": \"soft glow on cheeks, forehead, and collarbones\"\n      }\n    },\n\n    \"composition\": {\n      \"camera_type\": \"handheld or lifestyle camera\",\n      \"framing\": \"mid-shot portrait, seated pose\",\n      \"angle\": \"slightly above eye level, capturing the relaxed body posture and background atmosphere\",\n      \"color_palette\": \"warm tans, whites, light browns, soft skin tones\"\n    },\n\n    \"aesthetic\": {\n      \"style\": \"hyper-realistic lifestyle café portrait\",\n      \"mood\": \"playful, relaxed, summery and natural\",\n      \"clarity\": \"sharp details, warm tones, lifelike texture\"\n    },\n\n    \"output\": {\n      \"quality\": \"ultra-high-resolution\",\n      \"render_style\": \"photorealistic\"\n    }\n  }\n}",
         1,
         false,
@@ -745,22 +798,38 @@
         512,
         1,
         null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
         null
       ]
+    },
+    {
+      "id": 111,
+      "type": "Note",
+      "pos": [
+        -246.87220493005452,
+        1787.6804514611558
+      ],
+      "size": [
+        670.3910117007156,
+        88
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note ------------------------------------------------------------------------------->>>",
+      "properties": {
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "Lora or Ref image --------------------------------------------------------------->\n"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
     }
   ],
   "links": [
@@ -891,10 +960,10 @@
     "ue_links": [],
     "links_added_by_ue": [],
     "ds": {
-      "scale": 0.9229599817706443,
+      "scale": 1.635079908265586,
       "offset": [
-        798.4898220953735,
-        112.3930160534652
+        574.2105267685531,
+        -1445.189544950036
       ]
     },
     "comfyui_mcp": {

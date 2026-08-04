@@ -68,7 +68,7 @@ Das ist der Modus, den du in deinem Test-Workflow siehst: Referenzbild rein, per
 
 **Voraussetzungen für `identity_provider = krea2edit`:**
 - Das separate Custom Node **`comfyui-krea2edit`** muss installiert sein (`ComfyUI/custom_nodes/comfyui-krea2edit`)
-- Die **`krea2_identity_edit` LoRA** muss vorhanden und geladen sein
+- Die **[`krea2_identity_edit` LoRA](https://civitai.com/models/2761113/krea-2-identity-edit)** muss vorhanden und geladen sein
 - Eine **VAE** muss am RegioCraft-Node angeschlossen sein (ohne VAE bleibt der Identity-Pfad deaktiviert, RegioCraft fällt automatisch auf normales Forward zurück)
 - Maximal **2 gleichzeitige Referenzbilder** (Scene + Subject) — das ist die trainierte Obergrenze der LoRA selbst, keine RegioCraft-Beschränkung. Mehr aktive Referenz-Regionen werden geloggt und ignoriert, kein Fehler.
 
