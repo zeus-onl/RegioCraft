@@ -85,6 +85,20 @@ except Exception:
     _pext = None
     _WRAPPER_ENUM = "diffusion_model"
 
+# Phase 1+2 identity-provider module (2026-08-02): standalone interface + Krea2Edit
+# adapter, lives in identity_provider.py next to this file. Import is defensive --
+# if it's missing/broken, RegioCraft must keep working exactly as before with
+# identity_provider simply unavailable (falls back to normal forward at runtime).
+try:
+    from . import identity_provider as _identity_provider_mod
+except Exception:
+    try:
+        import identity_provider as _identity_provider_mod
+    except Exception as _e:
+        logging.info("[RegioCraft] identity_provider module not loadable (%s) -- "
+                     "identity_provider widget will fall back to 'none' behavior.", _e)
+        _identity_provider_mod = None
+
 WRAPPER_KEY = "regiocraft"
 __version__ = "0.1.0"
 
@@ -420,7 +434,9 @@ def _make_isolation_wrapper(orig_fn):
 class _RegioCraftSession:
     def __init__(self, patcher, active_regions, norm_boxes, seam_feather,
                  blend_override, sparse_threshold, steps_without_applying,
-                 lora_ramp_calls, attention_isolation):
+                 lora_ramp_calls, attention_isolation,
+                 identity_provider_name="none", identity_ref_boost=4.0,
+                 identity_vae=None):
         self.patcher = patcher
         self.active = active_regions           # list of dicts with 'name','lora_path','strength'
         self.norm_boxes = norm_boxes            # list of (x0,y0,x1,y1) normalised
@@ -430,6 +446,16 @@ class _RegioCraftSession:
         self.steps_without_applying = max(0, int(steps_without_applying))
         self.lora_ramp_calls = max(0, int(lora_ramp_calls))
         self.attention_isolation = float(attention_isolation)
+
+        # -- Phase 3: identity provider (2026-08-02) ------------------------
+        # 'none' preserves 100% of the old behavior (no provider ever loaded,
+        # no ref encoding attempted) -- existing workflows are unaffected.
+        self.identity_provider_name = str(identity_provider_name or "none")
+        self.identity_ref_boost = float(identity_ref_boost)
+        self._identity_vae = identity_vae
+        self._identity_provider = None      # lazy-instantiated, once, on first run()
+        self._identity_provider_load_attempted = False
+        self._identity_refs = None          # lazy-built, once, cached list[dict] or []
 
         self._model_call_index = 0
         self._ramp_multiplier = 1.0
@@ -524,6 +550,21 @@ class _RegioCraftSession:
             coverage += mf
             same += torch.outer(mf, mf)
         cross = (torch.outer(coverage, coverage) - same).clamp(min=0.0)
+        # PERF (2026-08-02): with a single region (or fully-overlapping regions),
+        # 'cross' is mathematically all-zero -- there's no other region to dampen
+        # attention against. Patching optimized_attention_masked anyway forces
+        # every block off the fused/flash attention kernel onto the slow explicit
+        # additive-mask path, for a bias that does nothing. Skip the patch
+        # entirely in that case (treat exactly like attention_isolation=0) --
+        # same numerical result, much faster, especially at higher resolutions
+        # where the seq x seq bias tensor itself gets large.
+        if not torch.any(cross > 0):
+            logging.info("[RegioCraft] attention_isolation=%.1f requested but cross-region "
+                        "bias is all-zero (only %d region(s) active) -- skipping the "
+                        "attention patch entirely to keep the fast attention kernel.",
+                        strength, len(self._region_masks_d))
+            self._img_bias = None
+            return
         self._img_bias = (-strength * cross).to(cdt)
 
     def _full_attn_bias(self, seq, device, dtype):
@@ -572,7 +613,7 @@ class _RegioCraftSession:
             return float(active_call) / float(n + 1)
         return 1.0
 
-    def _make_hook(self, region_fns):
+    def _make_hook(self, region_fns, _dbg_name="?"):
         # region_fns: {region_idx: compute_fn}
         def hook(module, inp, out):
             if not torch.is_tensor(out) or out.dim() < 2:
@@ -601,6 +642,79 @@ class _RegioCraftSession:
             return out + res.to(out.dtype)
         return hook
 
+    # ---- Phase 3: identity provider ------------------------------------
+    def _encode_identity_ref(self, vae, image_tensor):
+        """RAW vae.encode, deliberately WITHOUT process_latent_in -- the
+        identity provider's forward() applies process_latent_in itself
+        (matches Krea2EditModelPatch's own reference implementation exactly).
+        Double-applying it here would silently corrupt the ref latent."""
+        img = image_tensor.movedim(-1, 1)  # [1,3,H,W]
+        return vae.encode(img.movedim(1, -1))
+
+    def _maybe_build_identity_refs(self):
+        """Lazily load the configured provider and encode ref latents from
+        any active region with a ref_image, once per session. Never raises --
+        any failure logs a warning and disables the identity path for this
+        run, falling back to RegioCraft's normal forward untouched."""
+        if self.identity_provider_name == "none":
+            self._identity_refs = []
+            return
+        if not self._identity_provider_load_attempted:
+            self._identity_provider_load_attempted = True
+            if _identity_provider_mod is None:
+                logging.warning("[RegioCraft] identity_provider='%s' requested but the "
+                                "identity_provider module isn't loaded; falling back to "
+                                "normal forward.", self.identity_provider_name)
+            else:
+                self._identity_provider = _identity_provider_mod.get_default_provider(
+                    self.identity_provider_name)
+                if self._identity_provider is None:
+                    logging.warning("[RegioCraft] identity_provider='%s' unavailable "
+                                    "(see prior log line for why); falling back to "
+                                    "normal forward.", self.identity_provider_name)
+        if self._identity_provider is None:
+            self._identity_refs = []
+            return
+        if self._identity_refs is not None:
+            return  # already built this session
+
+        if self._identity_vae is None:
+            logging.warning("[RegioCraft] identity_provider='%s' set but no VAE connected "
+                            "to the RegioCraft node; identity path disabled, falling back "
+                            "to normal forward.", self.identity_provider_name)
+            self._identity_refs = []
+            return
+
+        candidates = [r for r in self.active if r.get("ref_image")]
+        if not candidates:
+            self._identity_refs = []
+            return
+
+        cap = self._identity_provider.max_refs
+        if len(candidates) > cap:
+            logging.warning("[RegioCraft] %d region(s) have ref_image but identity_provider "
+                            "'%s' supports at most %d simultaneous ref(s) (trained-on limit, "
+                            "not a RegioCraft restriction); using the first %d, in region order.",
+                            len(candidates), self.identity_provider_name, cap, cap)
+            candidates = candidates[:cap]
+
+        refs = []
+        for r in candidates:
+            try:
+                img = _load_ref_image_tensor(r["ref_image"])
+                img = _cap_image_longest_side(img)  # OOM fix: cap before any fit/encode
+                # Pass the RAW image (not a pre-encoded latent) so the provider can
+                # use its blur-proof pixel-space fit path -- resample-then-encode at
+                # the ACTUAL target resolution, known only at forward() time, not here.
+                refs.append({"image": img, "boost": self.identity_ref_boost})
+            except Exception as e:
+                logging.warning("[RegioCraft] could not load identity ref '%s' for region "
+                                "'%s': %s", r["ref_image"], r.get("name", "?"), e)
+        self._identity_refs = refs
+        if refs:
+            logging.info("[RegioCraft] identity_provider='%s' active with %d ref(s).",
+                        self.identity_provider_name, len(refs))
+
     def run(self, executor, *args, **kwargs):
         self._model_call_index += 1
         if self.steps_without_applying > 0 and self._model_call_index <= self.steps_without_applying:
@@ -612,7 +726,9 @@ class _RegioCraftSession:
             dev = args[0].device if args and torch.is_tensor(args[0]) else \
                 next(dm.parameters()).device
             self._prepare(dev, args[0] if args else None)
-        if not self._layer_map:
+        self._maybe_build_identity_refs()
+        use_identity = bool(self._identity_refs)
+        if not self._layer_map and not use_identity:
             return executor(*args, **kwargs)
 
         global _ACTIVE_ISOLATION_SESSION
@@ -623,12 +739,37 @@ class _RegioCraftSession:
         handles = []
         try:
             for name, (mod, region_fns) in self._layer_map.items():
-                handles.append(mod.register_forward_hook(self._make_hook(region_fns)))
+                handles.append(mod.register_forward_hook(self._make_hook(region_fns, _dbg_name=name)))
             if target is not None:
                 mod, attr, orig_fn = target
                 _ACTIVE_ISOLATION_SESSION = self
                 setattr(mod, attr, _make_isolation_wrapper(orig_fn))
-            return executor(*args, **kwargs)
+
+            if use_identity:
+                # Phase 3: RegioCraft OWNS the forward here -- it calls the
+                # identity provider as a plain library function from INSIDE
+                # this same try-block, so the hooks + attention patch just
+                # registered above stay active around the call. This is the
+                # fix for the 2026-08-02 wrapper-stacking bug: no second
+                # competing WrappersMP.DIFFUSION_MODEL patch is involved.
+                x = args[0] if len(args) > 0 else kwargs.get("x")
+                timesteps = args[1] if len(args) > 1 else kwargs.get("timesteps")
+                context = args[2] if len(args) > 2 else kwargs.get("context")
+                transformer_options = kwargs.get("transformer_options")
+                if transformer_options is None:
+                    for a in reversed(args):
+                        if isinstance(a, dict):
+                            transformer_options = a
+                            break
+                transformer_options = transformer_options or {}
+                result = self._identity_provider.forward(
+                    self.patcher, x, timesteps, context,
+                    transformer_options=transformer_options,
+                    refs=self._identity_refs, vae=self._identity_vae)
+                return result
+
+            result = executor(*args, **kwargs)
+            return result
         finally:
             for h in handles:
                 h.remove()
@@ -648,6 +789,28 @@ def _load_ref_image_tensor(name):
     img = ImageOps.exif_transpose(img).convert("RGB")
     arr = np.asarray(img).astype(np.float32) / 255.0
     return torch.from_numpy(arr)[None]
+
+
+def _cap_image_longest_side(image_tensor, max_side=2048):
+    """Downscale an [1,H,W,3] IMAGE tensor so its longest side is <= max_side,
+    BEFORE any target-resolution fit/crop happens. (2026-08-02, OOM fix.)
+
+    _fit_encode_image (comfyui-krea2edit) already resamples the reference to
+    the TARGET resolution before VAE-encoding it, so final output quality is
+    unaffected by this cap -- it only prevents holding+interpolating a raw
+    multi-thousand-pixel phone photo in memory (a real, separate spike from
+    the target-resolution encode itself, on top of whatever's already loaded
+    for the DiT forward pass)."""
+    h, w = image_tensor.shape[1], image_tensor.shape[2]
+    longest = max(h, w)
+    if longest <= max_side:
+        return image_tensor
+    scale = max_side / float(longest)
+    new_h, new_w = max(1, round(h * scale)), max(1, round(w * scale))
+    img = image_tensor.movedim(-1, 1)  # [1,H,W,3] -> [1,3,H,W]
+    img = torch.nn.functional.interpolate(img, size=(new_h, new_w), mode="bicubic",
+                                          antialias=True)
+    return img.clamp(0.0, 1.0).movedim(1, -1)  # back to [1,H,W,3]
 
 
 def _encode_reference(model, vae, image_tensor):
@@ -714,8 +877,24 @@ def _rect_token_mask_pixel(H, W, nx0, ny0, nx1, ny1, feather):
 # built-in ConditioningSetMask node uses, so it works with any KSampler and
 # any model, not just Krea2.
 # ============================================================================
-def _encode_text(clip, text):
-    tokens = clip.tokenize(text or "")
+def _encode_text(clip, text, images=None):
+    """images (if given): a list of IMAGE tensors ([1,H,W,3] each, matching
+    _load_ref_image_tensor's output) fed through the CLIP tokenizer's native
+    `images=` support -- confirmed present on Krea2's Qwen3-VL tokenizer
+    (comfy/text_encoders/qwen3vl.py) and passed straight through by the
+    standard clip.tokenize(**kwargs) wrapper. This routes the reference image
+    through the actual vision encoder (genuine semantic understanding, the
+    same mechanism community Krea2-edit nodes use for identity-preserving
+    editing) rather than only the VAE-latent nudge Reference Lock does. Falls
+    back to plain text-only tokenize if the installed tokenizer doesn't
+    support the images kwarg (older ComfyUI, or a non-Krea2 CLIP)."""
+    try:
+        if images:
+            tokens = clip.tokenize(text or "", images=images)
+        else:
+            tokens = clip.tokenize(text or "")
+    except TypeError:
+        tokens = clip.tokenize(text or "")
     cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
     return [[cond, {"pooled_output": pooled}]]
 
@@ -735,16 +914,28 @@ def _mask_conditioning(cond_list, mask, strength=1.0):
 def _build_region_conditioning(clip, base_prompt, prepared_regions, norm_boxes,
                                 cw, ch, text_strength):
     """Whole-image base conditioning + one masked regional conditioning per
-    region that has its own prompt text. Regions without text contribute
-    nothing here -- their identity comes purely from the LoRA/LoKr masking."""
+    region that has its own prompt text and/or a reference image. A region
+    with a ref_image gets that image threaded through Krea2's native vision
+    path alongside its text (true VLM-grounded identity), not just the
+    separate VAE-latent Reference Lock mechanism. Regions with neither text
+    nor a ref image contribute nothing here -- their identity comes purely
+    from the LoRA/LoKr masking."""
     base_prompt = base_prompt or ""
     combined = _encode_text(clip, base_prompt)
     for r, box in zip(prepared_regions, norm_boxes):
         text = r.get("prompt", "")
-        if not text:
+        ref_name = r.get("ref_image", "")
+        if not text and not ref_name:
             continue
-        full_text = f"{base_prompt}, {text}" if base_prompt else text
-        region_cond = _encode_text(clip, full_text)
+        full_text = f"{base_prompt}, {text}" if (base_prompt and text) else (text or base_prompt)
+        images = None
+        if ref_name:
+            try:
+                images = [_load_ref_image_tensor(ref_name)]
+            except Exception as e:
+                logging.warning("[RegioCraft] region '%s': could not load ref image '%s' "
+                                "for VLM conditioning: %s", r.get("name", "?"), ref_name, e)
+        region_cond = _encode_text(clip, full_text, images=images)
         x0, y0, x1, y1 = box
         mask = _rect_token_mask_pixel(ch, cw, x0, y0, x1, y1, 0.02)
         combined += _mask_conditioning(region_cond, mask, text_strength)
@@ -802,6 +993,24 @@ class RegioCraft:
                 "ref_start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "ref_end_percent": ("FLOAT", {"default": 0.60, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "ref_feather": ("FLOAT", {"default": 0.06, "min": 0.0, "max": 0.5, "step": 0.01}),
+                "identity_provider": (["none", "krea2edit"], {"default": "none",
+                    "tooltip": "Phase 3 (2026-08-02): 'none' = old behavior, unchanged. "
+                               "'krea2edit' runs the FULL diffusion forward through "
+                               "comfyui-krea2edit's trained identity-preservation path "
+                               "(replaces this node's normal forward ONCE per model call, "
+                               "never once per region) for any active region that has a "
+                               "ref_image set. Region-LoRA hooks and attention isolation "
+                               "stay active around that call -- RegioCraft remains the sole "
+                               "owner of the model wrapper. Capped at 2 simultaneous refs "
+                               "(that LoRA's trained limit); extra ref_image regions beyond "
+                               "that are logged and ignored, not an error. Requires the "
+                               "comfyui-krea2edit custom node + its LoRA installed, and a "
+                               "'vae' connected to this node."}),
+                "identity_ref_boost": ("FLOAT", {"default": 4.0, "min": 0.0, "max": 1000.0, "step": 0.1,
+                    "tooltip": "Reference-fidelity dial passed to the identity provider "
+                               "(Krea2Edit's ref_boost). Ignored if identity_provider='none'. "
+                               "1.0=off, ~4.0=strong likeness (provider's own recommended "
+                               "default), >10=over-copy risk."}),
             },
             "optional": {
                 "bboxes": ("BOUNDING_BOX",),
@@ -836,7 +1045,7 @@ class RegioCraft:
               lora_ramp_calls, attention_isolation, ref_strength, ref_start_percent,
               ref_end_percent, ref_feather, base_prompt="", text_strength=1.0,
               auto_activate_from_prompt=False, bboxes=None, vae=None, base_strength=1.0,
-              **kwargs):
+              identity_provider="none", identity_ref_boost=4.0, **kwargs):
 
         regions = _parse_regions(regions_json)
         cw, ch = int(canvas_width), int(canvas_height)
@@ -848,7 +1057,14 @@ class RegioCraft:
         for i, r in enumerate(regions):
             connected = kwargs.get(f"region_prompt_{i + 1}")
             if connected:
+                logging.info("[RegioCraft] region %d prompt overridden by connected "
+                             "region_prompt_%d input: %r -> %r",
+                             i + 1, i + 1, r["prompt"], connected)
                 r["prompt"] = connected
+            elif f"region_prompt_{i + 1}" in kwargs:
+                logging.info("[RegioCraft] region %d: region_prompt_%d input is wired but "
+                             "empty/falsy (%r) -- keeping typed-in prompt %r",
+                             i + 1, i + 1, connected, r["prompt"])
 
         def has_lora(r):
             return r["lora"] not in ("None", "") and (r["strength"] * base_strength) != 0.0
@@ -912,7 +1128,9 @@ class RegioCraft:
         patched = model.clone()
         session = _RegioCraftSession(
             patched, prepared_regions, norm_boxes, seam_feather, blend_override,
-            sparse_threshold, steps_without_applying, lora_ramp_calls, attention_isolation)
+            sparse_threshold, steps_without_applying, lora_ramp_calls, attention_isolation,
+            identity_provider_name=identity_provider, identity_ref_boost=identity_ref_boost,
+            identity_vae=vae)
 
         def wrapper(executor, *args, **kwargs):
             return session.run(executor, *args, **kwargs)
