@@ -22,6 +22,12 @@ A normal LoRA stack applies every LoRA **everywhere, uniformly**. Load two chara
 - **Auto-activate from trigger names.** Give a region a `trigger` name and turn on `auto_activate_from_prompt`, and that region switches on automatically whenever its name appears in `base_prompt` — write "Alice and Bob talking" and the regions named Alice and Bob activate on their own, no manual toggling. Regions with no trigger set just keep using their manual enable toggle, since plenty of LoRAs don't need a trigger word at all. Inspired by a conversation with Gorecheese about balancing named, language-described characters alongside character LoRAs in the same node.
 - **fp8-safe.** Works on quantized Krea2 Turbo checkpoints, where the native ComfyUI hook-LoRA path crashes (`'Linear' object has no attribute 'weight_scale'`) — RegioCraft only touches activations, never quantized weights.
 
+---
+☕ **Support the Zeus Project**
+If this model's been useful to you and you feel like buying me a coffee: [paypal.me/werk12](https://paypal.me/werk12)
+Helps me keep building Zeus Project stuff and pushing out new models/nodes.
+---
+
 ## Install
 
 1. Copy the `RegioCraft/` folder into `ComfyUI/custom_nodes/`.
