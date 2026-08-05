@@ -10,4 +10,4 @@ Repository = "https://github.com/zeus-onl/RegioCraft"
 [tool.comfy]
 PublisherId = "zeus-onl"
 DisplayName = "RegioCraft"
-Icon = ""
+Icon = "https://1.gravatar.com/avatar/3865c238124b513e0813719ae1aabeefa437652304a76585f79e7ed692a9f2de?size=256"
