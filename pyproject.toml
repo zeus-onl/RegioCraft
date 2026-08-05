@@ -4,6 +4,9 @@ description = "Put unlimited character LoRAs into one image, each locked to its 
 version = "1.0.0"
 license = { file = "LICENSE" }
 
+[project.urls]
+Repository = "https://github.com/zeus-onl/RegioCraft"
+
 [tool.comfy]
 PublisherId = "zeus-onl"
 DisplayName = "RegioCraft"
