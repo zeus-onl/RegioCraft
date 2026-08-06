@@ -99,6 +99,71 @@ function defaultRegions() {
 
 function clamp01(v) { return Math.max(0, Math.min(1, v)); }
 
+// Collapse a possibly-inverted drag (dragged past the opposite edge) into a
+// normal positive-size box, clamped into the canvas. Same idea as KJ's
+// normalizeBox in ZIT-Ideogram's region editor.
+function normalizeRect(b) {
+  let { x, y, w, h } = b;
+  if (w < 0) { x += w; w = -w; }
+  if (h < 0) { y += h; h = -h; }
+  x = clamp01(x); y = clamp01(y);
+  w = Math.min(w, 1 - x); h = Math.min(h, 1 - y);
+  return { x, y, w: Math.max(0, w), h: Math.max(0, h) };
+}
+
+// Apply a resize-handle drag (any of the 8 directions) to a region's
+// starting rect, given how far the pointer has moved in normalized coords.
+function applyResize(mode, start, dx, dy) {
+  let { x, y, w, h } = start;
+  switch (mode) {
+    case "resize-br": w += dx; h += dy; break;
+    case "resize-tl": x += dx; y += dy; w -= dx; h -= dy; break;
+    case "resize-tr": y += dy; w += dx; h -= dy; break;
+    case "resize-bl": x += dx; w -= dx; h += dy; break;
+    case "resize-t": y += dy; h -= dy; break;
+    case "resize-b": h += dy; break;
+    case "resize-l": x += dx; w -= dx; break;
+    case "resize-r": w += dx; break;
+  }
+  return normalizeRect({ x, y, w, h });
+}
+
+// Which of a region's 8 handles (if any) sits under a normalized point, or
+// "move" if the point is inside the region body. Handles are a fixed
+// CSS-pixel size, but regions live in 0-1 space, so the pixel radius must be
+// divided by the canvas's actual on-screen width/height each time.
+function hitTestRegions(node, nx, ny, canvasRect) {
+  const regions = readRegions(node);
+  const rxr = HANDLE / canvasRect.width, ryr = HANDLE / canvasRect.height;
+  for (let i = regions.length - 1; i >= 0; i--) {
+    const reg = regions[i];
+    const x1 = reg.x ?? 0, y1 = reg.y ?? 0;
+    const x2 = x1 + (reg.w ?? 0.3), y2 = y1 + (reg.h ?? 0.3);
+    const near = (cx, cy) => Math.abs(nx - cx) < rxr && Math.abs(ny - cy) < ryr;
+    if (near(x1, y1)) return { i, mode: "resize-tl" };
+    if (near(x2, y1)) return { i, mode: "resize-tr" };
+    if (near(x1, y2)) return { i, mode: "resize-bl" };
+    if (near(x2, y2)) return { i, mode: "resize-br" };
+    if (nx >= x1 && nx <= x2 && Math.abs(ny - y1) < ryr) return { i, mode: "resize-t" };
+    if (nx >= x1 && nx <= x2 && Math.abs(ny - y2) < ryr) return { i, mode: "resize-b" };
+    if (ny >= y1 && ny <= y2 && Math.abs(nx - x1) < rxr) return { i, mode: "resize-l" };
+    if (ny >= y1 && ny <= y2 && Math.abs(nx - x2) < rxr) return { i, mode: "resize-r" };
+    if (nx >= x1 && nx <= x2 && ny >= y1 && ny <= y2) return { i, mode: "move" };
+  }
+  return null;
+}
+
+function cursorForMode(mode) {
+  switch (mode) {
+    case "move": return "move";
+    case "resize-tl": case "resize-br": return "nwse-resize";
+    case "resize-tr": case "resize-bl": return "nesw-resize";
+    case "resize-t": case "resize-b": return "ns-resize";
+    case "resize-l": case "resize-r": return "ew-resize";
+    default: return "crosshair";
+  }
+}
+
 function readRegions(node) {
   const w = node.widgets?.find((x) => x.name === JSON_WIDGET);
   if (!w) return [];
@@ -542,6 +607,13 @@ function buildCanvasWidget(node) {
     return [clamp01((e.clientX - r.left) / r.width), clamp01((e.clientY - r.top) / r.height)];
   };
   const onDown = (e) => {
+    // Defensive: if a previous drag never received its up-event, clear any
+    // stale state before starting a new one (see onUp for why this could
+    // otherwise get stuck).
+    if (drag) {
+      onUp(e);
+    }
+
     const r = canvas.getBoundingClientRect();
     const [nx, ny] = toNorm(e);
 
@@ -550,25 +622,50 @@ function buildCanvasWidget(node) {
       const bx0 = r.width - CLEARBTN - 6, by0 = 6;
       if (px >= bx0 && px <= bx0 + CLEARBTN && py >= by0 && py <= by0 + CLEARBTN) {
         bgImage = null; draw();
+        e.preventDefault(); e.stopPropagation();
         return;
       }
     }
 
-    const regions = readRegions(node);
-    for (let i = regions.length - 1; i >= 0; i--) {
-      const reg = regions[i];
-      const rx = reg.x ?? 0, ry = reg.y ?? 0, rw = reg.w ?? 0.3, rh = reg.h ?? 0.3;
-      if (Math.abs(nx - (rx + rw)) * r.width <= HANDLE && Math.abs(ny - (ry + rh)) * r.height <= HANDLE) {
-        drag = { i, mode: "resize" }; break;
-      }
-      if (nx >= rx && nx <= rx + rw && ny >= ry && ny <= ry + rh) {
-        drag = { i, mode: "move", ox: nx - rx, oy: ny - ry }; break;
-      }
+    const hit = hitTestRegions(node, nx, ny, r);
+    if (hit && hit.mode === "move") {
+      const reg = readRegions(node)[hit.i];
+      drag = { i: hit.i, mode: "move", ox: nx - (reg.x ?? 0), oy: ny - (reg.y ?? 0) };
+    } else if (hit) {
+      // resize-tl/tr/bl/br/t/b/l/r -- any of the 8 handles, not just bottom-right.
+      const reg = readRegions(node)[hit.i];
+      drag = {
+        i: hit.i, mode: hit.mode, startNorm: { nx, ny },
+        start: { x: reg.x ?? 0, y: reg.y ?? 0, w: reg.w ?? 0.3, h: reg.h ?? 0.3 },
+      };
+    } else {
+      // Empty canvas: start drawing a brand-new region here, KJ-style, instead
+      // of requiring the "+ Add Region" button first. Dropped again in onUp
+      // if it never grows past an accidental-click size.
+      const regions = readRegions(node);
+      const nb = defaultRegion(regions.length, regions.length + 1);
+      nb.x = nx; nb.y = ny; nb.w = 0; nb.h = 0;
+      regions.push(nb);
+      writeRegions(node, regions);
+      drag = {
+        i: regions.length - 1, mode: "resize-br", isNew: true,
+        startNorm: { nx, ny }, start: { x: nx, y: ny, w: 0, h: 0 },
+      };
     }
     if (drag) {
+      // CRITICAL: stopPropagation, not just preventDefault. Without it the
+      // mousedown keeps bubbling up into LiteGraph's own canvas, which also
+      // reacts to it (node-drag/pan handling) -- the two compete for the
+      // same gesture, and LiteGraph's own handling appears to win while the
+      // pointer is still over the DOM widget, only releasing control once
+      // the pointer leaves it (the "magnet" bug). Matches the working
+      // pattern in ZIT-Ideogram's KJ region editor: stopPropagation on
+      // mousedown, plain mouse events (not Pointer Events/capture), and
+      // move/up listeners on `document` rather than `window`.
       e.preventDefault();
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp);
+      e.stopPropagation();
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
     }
   };
   const onMove = (e) => {
@@ -584,18 +681,44 @@ function buildCanvasWidget(node) {
       if (reg.x + rw > 1) reg.x = 1 - rw;
       if (reg.y + rh > 1) reg.y = 1 - rh;
     } else {
-      reg.w = Math.max(MINSIZE, clamp01(nx - (reg.x ?? 0)));
-      reg.h = Math.max(MINSIZE, clamp01(ny - (reg.y ?? 0)));
+      const dx = nx - drag.startNorm.nx, dy = ny - drag.startNorm.ny;
+      const nb = applyResize(drag.mode, drag.start, dx, dy);
+      reg.x = nb.x; reg.y = nb.y; reg.w = nb.w; reg.h = nb.h;
     }
     writeRegions(node, regions);
     draw();
   };
-  const onUp = () => {
+  const onUp = (e) => {
+    if (drag) {
+      const regions = readRegions(node);
+      const reg = regions[drag.i];
+      if (drag.isNew) {
+        if (!reg || reg.w < 0.01 || reg.h < 0.01) {
+          // Accidental click on empty canvas, never dragged into a real size --
+          // drop it instead of leaving a zero-size region behind.
+          if (reg) regions.splice(drag.i, 1);
+          writeRegions(node, regions);
+        } else {
+          // A real new region: now (and only now) build its control row --
+          // doing this on every mousemove during the drag would rebuild all
+          // the widgets dozens of times a second.
+          rebuildRows(node);
+        }
+      }
+    }
     drag = null;
-    window.removeEventListener("pointermove", onMove);
-    window.removeEventListener("pointerup", onUp);
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    draw();
   };
-  canvas.addEventListener("pointerdown", onDown);
+  canvas.addEventListener("mousedown", onDown);
+  canvas.addEventListener("mousemove", (e) => {
+    if (drag) return; // during an active drag, cursor is set once and left alone
+    const r = canvas.getBoundingClientRect();
+    const [nx, ny] = toNorm(e);
+    const hit = hitTestRegions(node, nx, ny, r);
+    canvas.style.cursor = hit ? cursorForMode(hit.mode) : "crosshair";
+  });
 
   canvas.addEventListener("dragover", (e) => {
     e.preventDefault();
