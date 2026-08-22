@@ -34,6 +34,60 @@ import importlib.util
 import logging
 
 
+def _grounding_template(n_images, system_prompt=""):
+    """Same template comfyui-krea2edit's Krea2EditGroundedEncode uses -- the
+    krea2_edit LoRA was trained with the instruction encoded TOGETHER with the
+    source image through Qwen3-VL (vision tokens + instruction, one shared
+    system prompt). Duplicated here (not imported) so this keeps working even
+    if comfyui-krea2edit reshuffles its internal class layout -- only the
+    template STRING itself has to stay in sync, and that's frozen by the
+    LoRA's training data, not something that changes casually.
+    (2026-08-18, edit-instruction grounding for RegioCraft ref+prompt regions.)
+    """
+    sp = (system_prompt or "").strip() or (
+        "Describe the image by detailing the color, shape, size, "
+        "texture, quantity, text, spatial relationships of the objects and background:"
+    )
+    vis = "<|vision_start|><|image_pad|><|vision_end|>" * n_images
+    return ("<|im_start|>system\n" + sp + "<|im_end|>\n<|im_start|>user\n"
+            + vis + "{}<|im_end|>\n<|im_start|>assistant\n")
+
+
+def _prep_grounding_image(img, grounding_px=768):
+    """Cap the longest side fed to the VLM, same as Krea2EditGroundedEncode's
+    own _prep(). img is an IMAGE tensor [1,H,W,3]."""
+    h, w = img.shape[1], img.shape[2]
+    if grounding_px and max(h, w) > grounding_px:
+        import comfy.utils
+        s = grounding_px / max(h, w)
+        samples = img.movedim(-1, 1)
+        samples = comfy.utils.common_upscale(samples, round(w * s), round(h * s), "area", "disabled")
+        img = samples.movedim(1, -1)
+    return img[:, :, :, :3]
+
+
+def build_grounded_edit_context(clip, prompt, images, grounding_px=768, system_prompt=""):
+    """Encode an edit instruction grounded on reference image(s) -- the
+    training-matched SEMANTIC path of krea2_edit (mirrors comfyui-krea2edit's
+    Krea2EditGroundedEncode node exactly: same template, same tokenize(images=,
+    llama_template=) call).
+
+    Returns the raw cond tensor (the same format RegioCraft's own
+    `_encode_text()` in __init__.py already produces), NOT a CONDITIONING list.
+    This is injected directly as the diffusion model's `context` argument
+    from INSIDE the DIFFUSION_MODEL wrapper -- there is no hook to influence
+    ComfyUI's normal CONDITIONING->context batching from in here (that step
+    already ran, on whatever was wired into KSampler, before the wrapper is
+    ever called), so grounding on a per-region ref+prompt combo means
+    reproducing that one encode step manually and swapping it in.
+    """
+    imgs = [_prep_grounding_image(im, grounding_px) for im in images]
+    template = _grounding_template(len(imgs), system_prompt)
+    tokens = clip.tokenize(prompt or "", images=imgs, llama_template=template)
+    cond, _pooled = clip.encode_from_tokens(tokens, return_pooled=True)
+    return cond
+
+
 class IdentityProvider:
     """Minimal, model-agnostic identity-forward interface.
 
@@ -44,6 +98,12 @@ class IdentityProvider:
           "boost":  <float, optional -- reference-fidelity dial, provider-specific>,
           "boost_mask": <MASK tensor, optional -- e.g. restrict boost to a face>,
           "role":   <str, optional, provider-specific hint e.g. "scene"/"subject">,
+          "prompt": <str, optional (2026-08-18) -- per-ref edit instruction, e.g.
+                     "give him a hooked nose". Grounded on this ref's own image
+                     via build_grounded_edit_context() and used as the model's
+                     `context` for this call, REPLACING whatever conditioning
+                     was wired into KSampler. Empty/absent = old behavior,
+                     unchanged: pure identity/face-lock, no edit applied.>,
         }
     """
 
@@ -53,7 +113,7 @@ class IdentityProvider:
     #: truncating, so the caller has to make an explicit choice.
     max_refs = 1
 
-    def forward(self, model, x, timesteps, context, *, transformer_options, refs, vae=None):
+    def forward(self, model, x, timesteps, context, *, transformer_options, refs, vae=None, clip=None):
         raise NotImplementedError
 
 
@@ -108,8 +168,16 @@ class Krea2EditProvider(IdentityProvider):
         # ONCE per (resolution, fit_mode) combo, reused across every sampling step
         # for the life of this provider instance (one per RegioCraft session/generation).
         self._px_cache = {}
+        # 2026-08-20 perf fix: grounded-edit context (Qwen3-VL vision-language
+        # encode of ref image(s) + instruction) does NOT depend on x/timesteps --
+        # only on (clip, prompt, ref images), all fixed for the life of one
+        # generation. Without caching, forward() re-ran the full 4B-parameter
+        # VLM encode on EVERY sampling step (x2 for cond/uncond CFG passes) --
+        # e.g. 10 steps = 20 redundant VLM forward passes instead of 1.
+        self._grounded_context_cache = None
+        self._grounded_context_cache_key = None
 
-    def forward(self, model, x, timesteps, context, *, transformer_options, refs, vae=None):
+    def forward(self, model, x, timesteps, context, *, transformer_options, refs, vae=None, clip=None):
         if not refs:
             raise ValueError("[RegioCraft] Krea2EditProvider.forward() called with no refs.")
         if len(refs) > self.max_refs:
@@ -118,6 +186,49 @@ class Krea2EditProvider(IdentityProvider):
                 f"reference(s) (scene+subject, per its training); got {len(refs)}. "
                 f"More refs is untested territory -- see 2026-08-02 architecture note "
                 f"before raising this cap.")
+
+        # -- edit-instruction grounding (2026-08-18) ------------------------
+        # A ref with BOTH an image and non-empty 'prompt' text wants an actual
+        # edit ("give him a hooked nose"), not just identity lock. That needs
+        # the instruction encoded TOGETHER with the ref image through the
+        # training-matched grounding template -- plain identity/face-lock
+        # (image + boost, no prompt) is completely unaffected by this branch.
+        edit_prompts = [(r.get("prompt") or "").strip() for r in refs]
+        wants_edit = any(edit_prompts)
+        if wants_edit and clip is not None:
+            ref_images = [r["image"] for r in refs if r.get("image") is not None]
+            # Multiple simultaneous refs each with their own instruction get
+            # concatenated into one combined instruction -- krea2_edit_forward
+            # runs the diffusion model ONCE per call with ONE context, there is
+            # no per-ref instruction slot at that level (see identity_provider.py
+            # module docstring / 2026-08-18 RegioCraft README note).
+            combined_prompt = " ".join(p for p in edit_prompts if p)
+            cache_key = (id(clip), combined_prompt, tuple(id(im) for im in ref_images))
+            try:
+                if self._grounded_context_cache is not None and self._grounded_context_cache_key == cache_key:
+                    context = self._grounded_context_cache
+                else:
+                    context = build_grounded_edit_context(clip, combined_prompt, ref_images)
+                    self._grounded_context_cache = context
+                    self._grounded_context_cache_key = cache_key
+                # 2026-08-20 device fix: clip.encode_from_tokens' output device isn't
+                # guaranteed to match the diffusion model's compute device (x) -- krea2edit's
+                # own torch.cat([context] + src_imgs + [tgt_img]) requires all three to
+                # match, and this is the first real end-to-end path this branch has run.
+                context = context.to(x.device, x.dtype)
+                logging.info("[RegioCraft] identity_provider='krea2edit': grounded edit "
+                            "instruction active (%d ref image(s), prompt=%r).",
+                            len(ref_images), combined_prompt)
+            except Exception as e:
+                logging.warning("[RegioCraft] grounded edit-instruction encode failed (%s); "
+                                "falling back to the model's normal conditioning for this "
+                                "call (identity lock, if any, still applies).", e)
+        elif wants_edit and clip is None:
+            logging.warning("[RegioCraft] a region has a ref_image + edit prompt but no "
+                            "'clip' reached the identity provider; the edit instruction is "
+                            "being ignored this run. (Should not happen via RegioCraft's own "
+                            "node -- clip is wired automatically; only relevant if calling "
+                            "this provider directly.)")
 
         # PIXEL PATH (2026-08-02, blur fix): if every ref carries a raw 'image' and a
         # vae is connected, use krea2_edit_forward's own '_fit_encode_image' -- the

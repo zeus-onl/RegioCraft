@@ -436,7 +436,7 @@ class _RegioCraftSession:
                  blend_override, sparse_threshold, steps_without_applying,
                  lora_ramp_calls, attention_isolation,
                  identity_provider_name="none", identity_ref_boost=4.0,
-                 identity_vae=None):
+                 identity_vae=None, identity_clip=None):
         self.patcher = patcher
         self.active = active_regions           # list of dicts with 'name','lora_path','strength'
         self.norm_boxes = norm_boxes            # list of (x0,y0,x1,y1) normalised
@@ -453,6 +453,12 @@ class _RegioCraftSession:
         self.identity_provider_name = str(identity_provider_name or "none")
         self.identity_ref_boost = float(identity_ref_boost)
         self._identity_vae = identity_vae
+        # 'clip' (2026-08-18): needed only for the grounded edit-instruction branch
+        # (ref_image + prompt together) -- pure identity/face-lock regions never
+        # touch this. Always available in practice since RegioCraft.apply() always
+        # has a clip input; kept optional here so a future provider that doesn't
+        # need text grounding isn't forced to require one.
+        self._identity_clip = identity_clip
         self._identity_provider = None      # lazy-instantiated, once, on first run()
         self._identity_provider_load_attempted = False
         self._identity_refs = None          # lazy-built, once, cached list[dict] or []
@@ -706,7 +712,14 @@ class _RegioCraftSession:
                 # Pass the RAW image (not a pre-encoded latent) so the provider can
                 # use its blur-proof pixel-space fit path -- resample-then-encode at
                 # the ACTUAL target resolution, known only at forward() time, not here.
-                refs.append({"image": img, "boost": self.identity_ref_boost})
+                # 'prompt' (2026-08-18): this region's own optional edit instruction --
+                # empty for pure identity/face-lock regions (old behavior, unchanged),
+                # non-empty turns this ref into a grounded edit ("give him a hooked
+                # nose") via Krea2EditProvider's grounding branch. No extra widget/
+                # dropdown needed -- the combination of ref_image + prompt on the same
+                # region IS the signal.
+                refs.append({"image": img, "boost": self.identity_ref_boost,
+                            "prompt": r.get("prompt", "")})
             except Exception as e:
                 logging.warning("[RegioCraft] could not load identity ref '%s' for region "
                                 "'%s': %s", r["ref_image"], r.get("name", "?"), e)
@@ -765,7 +778,8 @@ class _RegioCraftSession:
                 result = self._identity_provider.forward(
                     self.patcher, x, timesteps, context,
                     transformer_options=transformer_options,
-                    refs=self._identity_refs, vae=self._identity_vae)
+                    refs=self._identity_refs, vae=self._identity_vae,
+                    clip=self._identity_clip)
                 return result
 
             result = executor(*args, **kwargs)
@@ -1005,7 +1019,18 @@ class RegioCraft:
                                "(that LoRA's trained limit); extra ref_image regions beyond "
                                "that are logged and ignored, not an error. Requires the "
                                "comfyui-krea2edit custom node + its LoRA installed, and a "
-                               "'vae' connected to this node."}),
+                               "'vae' connected to this node. "
+                               "EDIT INSTRUCTIONS (2026-08-18): if a region also has its own "
+                               "'prompt' text filled in alongside ref_image, that text is "
+                               "grounded on the ref image (Qwen3-VL, training-matched "
+                               "template) and used as an actual edit instruction, e.g. 'give "
+                               "him a hooked nose' -- no extra toggle needed, ref_image+prompt "
+                               "together IS the signal. Regions with only ref_image (no "
+                               "prompt) keep doing pure identity/face-lock as before. Only ONE "
+                               "combined instruction applies per model call -- if several "
+                               "regions have both ref_image and prompt at once, their texts "
+                               "are concatenated into a single instruction, not applied "
+                               "separately per region."}),
                 "identity_ref_boost": ("FLOAT", {"default": 4.0, "min": 0.0, "max": 1000.0, "step": 0.1,
                     "tooltip": "Reference-fidelity dial passed to the identity provider "
                                "(Krea2Edit's ref_boost). Ignored if identity_provider='none'. "
@@ -1130,7 +1155,7 @@ class RegioCraft:
             patched, prepared_regions, norm_boxes, seam_feather, blend_override,
             sparse_threshold, steps_without_applying, lora_ramp_calls, attention_isolation,
             identity_provider_name=identity_provider, identity_ref_boost=identity_ref_boost,
-            identity_vae=vae)
+            identity_vae=vae, identity_clip=clip)
 
         def wrapper(executor, *args, **kwargs):
             return session.run(executor, *args, **kwargs)

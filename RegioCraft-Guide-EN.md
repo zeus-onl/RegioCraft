@@ -58,9 +58,16 @@ Character LoRAs go into RegioCraft's own region rows, not into a global LoRA sta
 | `identity_provider` | `none` (default) or `krea2edit`. See dedicated section below. |
 | `identity_ref_boost` | Only relevant when `identity_provider = krea2edit`. Reference-fidelity dial: `1.0` = off, `~4.0` = strong likeness (recommended default), `>10` = risk of over-copying. |
 
-## Identity Provider (`krea2edit`) — reference image + prompt instruction
+## Identity Provider (`krea2edit`) — reference image, with or without an edit instruction
 
-This is the mode you see in your test workflow: feed in a reference image, describe via prompt what should happen to that person ("recolor the jacket to red," "the person on the left waving") — genuine instruction-based identity editing, not just identity locking.
+This is the mode you see in your test workflow. It has two distinct behaviors depending on what you fill in on the region row, and switching between them needs no extra toggle — the fields you already have decide it:
+
+- **Only `ref_image` set (no `prompt`)** — pure identity/face lock, unchanged from before. The person's face/appearance is held steady across the generation, no edit applied.
+- **`ref_image` + `prompt` set together** — genuine instruction-based editing (2026-08-18). The `prompt` text is grounded on that same reference image via Qwen3-VL, using the exact template the `krea2_identity_edit` LoRA was trained on (image + instruction encoded together, not separately), and the result is used as the model's actual conditioning for that call — e.g. "give him a hooked nose," "recolor the jacket to red." This is real instruction-based editing, not just identity locking.
+
+A region that only needs face-lock never touches the grounding branch at all — filling in a `prompt` on that same region is what turns it on. Your other regions running plain LoRA masking (no `ref_image`) are completely unaffected either way — you can still run up to 8 character-LoRA regions alongside one identity/edit region in the same generation.
+
+**One limit to know:** the underlying `krea2_edit_forward` engine runs the diffusion model **once per model call**, with **one** combined instruction — never once per region. If more than one active region has both `ref_image` and `prompt` at the same time, their texts get concatenated into a single instruction rather than applied separately per person. For one reference person with one edit, this doesn't matter at all.
 
 **Important to understand — this is a different mechanism from Reference Lock:**
 - **Reference Lock** (`ref_strength` etc.) — VAE-encodes the reference image once, gently nudges the prediction toward it during sampling. No text instruction involved.
