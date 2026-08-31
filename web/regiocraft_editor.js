@@ -212,17 +212,28 @@ function thumbFor(name, node) {
     img.src = api.apiURL(
       `/view?filename=${encodeURIComponent(fname)}&type=input&subfolder=${encodeURIComponent(subfolder)}&rand=${Math.random()}`
     );
-    img.onload = () => node.setDirtyCanvas(true, true);
+    img.onload = () => {
+      node.setDirtyCanvas(true, true);
+      if (window.app && app.graph) app.graph.setDirtyCanvas(true, true);
+    };
+    img.onerror = (e) => console.error(`[RegioCraft] failed to load ref image "${name}":`, e);
     THUMB_CACHE[name] = img;
   }
-  return img.complete && img.naturalWidth ? img : null;
+  const ready = img.complete && img.naturalWidth;
+  return ready ? img : null;
 }
 
 async function uploadRefImage(file) {
   const body = new FormData();
   body.append("image", file);
   body.append("type", "input");
-  const resp = await api.fetchApi("/upload/image", { method: "POST", body });
+  let resp;
+  try {
+    resp = await api.fetchApi("/upload/image", { method: "POST", body });
+  } catch (err) {
+    console.error("[RegioCraft] fetchApi threw during upload:", err);
+    return null;
+  }
   if (resp.status !== 200) {
     console.error("[RegioCraft] ref upload failed:", resp.status);
     return null;
@@ -237,15 +248,56 @@ function pickAndUploadRef(node, idx) {
   input.accept = "image/png,image/jpeg,image/webp,image/bmp";
   input.onchange = async () => {
     const file = input.files?.[0];
-    if (!file) return;
+    if (!file) { return; }
     const name = await uploadRefImage(file);
-    if (!name) return;
+    if (!name) { return; }
     const r = readRegions(node);
     if (r[idx]) {
       r[idx].ref_image = name;
       writeRegions(node, r);
       delete THUMB_CACHE[name];
+      if (node.__rc_setBgImage) {
+        const bgImg = new Image();
+        bgImg.crossOrigin = "anonymous";
+        const bgSlash = name.lastIndexOf("/");
+        const bgSubfolder = bgSlash >= 0 ? name.slice(0, bgSlash) : "";
+        const bgFname = bgSlash >= 0 ? name.slice(bgSlash + 1) : name;
+        bgImg.src = api.apiURL(`/view?filename=${encodeURIComponent(bgFname)}&type=input&subfolder=${encodeURIComponent(bgSubfolder)}&rand=${Date.now()}`);
+        bgImg.onload = () => {
+          node.__rc_setBgImage(bgImg);
+        };
+      }
       rebuildRows(node);
+      const __rc_newSize = node.computeSize();
+      node.setSize(__rc_newSize);
+      // Empirically confirmed: LiteGraph only fully re-lays-out widget rows after
+      // a real collapse/expand cycle (setDirtyCanvas + computeSize/setSize alone were
+      // not enough). Two toggle cycles were needed by hand, so we replicate that here
+      // automatically instead of chasing the exact internal LiteGraph cache mechanism.
+      const __rc_wasCollapsed = !!(node.flags && node.flags.collapsed);
+      let __rc_cycles = 0;
+      const __rc_toggleStep = () => {
+        node.flags = node.flags || {};
+        node.flags.collapsed = true;
+        node.setDirtyCanvas(true, true);
+        requestAnimationFrame(() => {
+          node.flags.collapsed = __rc_wasCollapsed;
+          node.setDirtyCanvas(true, true);
+          __rc_cycles++;
+          if (__rc_cycles < 2) {
+            requestAnimationFrame(__rc_toggleStep);
+          }
+        });
+      };
+      requestAnimationFrame(__rc_toggleStep);
+      node.setDirtyCanvas(true, true);
+      if (window.app && app.graph) app.graph.setDirtyCanvas(true, true);
+      requestAnimationFrame(() => {
+        node.setDirtyCanvas(true, true);
+        if (window.app && app.graph) app.graph.setDirtyCanvas(true, true);
+      });
+    } else {
+      console.error(`[RegioCraft] r[${idx}] does not exist! regions array length=${r.length}`);
     }
   };
   input.click();
@@ -262,6 +314,7 @@ function makeRefWidget(node, idx, region) {
       return [width, this.value ? THUMB_H + 8 : 20];
     },
     draw(ctx, drawNode, widgetWidth, y) {
+      try {
       const margin = 12;
       const w_ = widgetWidth - margin * 2;
       ctx.save();
@@ -308,6 +361,9 @@ function makeRefWidget(node, idx, region) {
         ctx.textAlign = "left";
       }
       ctx.restore();
+      } catch (err) {
+        console.error(`[RegioCraft] draw() threw for region ${idx + 1}:`, err);
+      }
     },
     mouse(event, pos, mNode) {
       const isDown = event.type === "pointerdown" || event.type === "mousedown";
@@ -416,15 +472,45 @@ function rebuildRows(node) {
     );
     markTransient(triggerW);
 
-    if (node.addCustomWidget) node.addCustomWidget(makeRefWidget(node, idx, region));
-    else node.widgets.push(makeRefWidget(node, idx, region));
+    if (node.addCustomWidget) {
+      node.addCustomWidget(makeRefWidget(node, idx, region));
+    } else {
+      node.widgets.push(makeRefWidget(node, idx, region));
+    }
 
     const rmW = node.addWidget("button", `  ✕ remove region ${idx + 1}`, null, () => {
       const r = readRegions(node);
       r.splice(idx, 1);
       writeRegions(node, r);
       rebuildRows(node);
+      const __rc_newSize = node.computeSize();
+      node.setSize(__rc_newSize);
+      // Empirically confirmed: LiteGraph only fully re-lays-out widget rows after
+      // a real collapse/expand cycle (setDirtyCanvas + computeSize/setSize alone were
+      // not enough). Two toggle cycles were needed by hand, so we replicate that here
+      // automatically instead of chasing the exact internal LiteGraph cache mechanism.
+      const __rc_wasCollapsed = !!(node.flags && node.flags.collapsed);
+      let __rc_cycles = 0;
+      const __rc_toggleStep = () => {
+        node.flags = node.flags || {};
+        node.flags.collapsed = true;
+        node.setDirtyCanvas(true, true);
+        requestAnimationFrame(() => {
+          node.flags.collapsed = __rc_wasCollapsed;
+          node.setDirtyCanvas(true, true);
+          __rc_cycles++;
+          if (__rc_cycles < 2) {
+            requestAnimationFrame(__rc_toggleStep);
+          }
+        });
+      };
+      requestAnimationFrame(__rc_toggleStep);
       node.setDirtyCanvas(true, true);
+      if (window.app && app.graph) app.graph.setDirtyCanvas(true, true);
+      requestAnimationFrame(() => {
+        node.setDirtyCanvas(true, true);
+        if (window.app && app.graph) app.graph.setDirtyCanvas(true, true);
+      });
     });
     markTransient(rmW);
   });
@@ -749,6 +835,7 @@ function buildCanvasWidget(node) {
   try { new ResizeObserver(() => draw()).observe(canvas); } catch (e) {}
   setTimeout(draw, 50);
   node.__rc_draw = draw;
+  node.__rc_setBgImage = onImageLoaded;
 
   const oldResize = node.onResize;
   node.onResize = function () { oldResize && oldResize.apply(this, arguments); draw(); };
@@ -788,6 +875,17 @@ app.registerExtension({
 
       buildCanvasWidget(node);
       rebuildRows(node);
+      // Defer a second rebuild to next tick: during ComfyUI's multi-tab
+      // canvas restore, onNodeCreated can fire before this node's real
+      // regions_json value has been written back in from the saved
+      // workflow, so the row above may have been built from stale/empty
+      // data even though regions_json itself ends up correct. Re-running
+      // rebuildRows once the event loop settles catches that case without
+      // touching regions_json's own value (see onConfigure guard above).
+      setTimeout(() => {
+        rebuildRows(node);
+        node.__rc_draw && node.__rc_draw();
+      }, 0);
 
       node.addWidget("button", "+ Add Region", null, () => {
         const regions = readRegions(node);
