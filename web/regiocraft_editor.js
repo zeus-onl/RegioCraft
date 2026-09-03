@@ -256,17 +256,12 @@ function pickAndUploadRef(node, idx) {
       r[idx].ref_image = name;
       writeRegions(node, r);
       delete THUMB_CACHE[name];
-      if (node.__rc_setBgImage) {
-        const bgImg = new Image();
-        bgImg.crossOrigin = "anonymous";
-        const bgSlash = name.lastIndexOf("/");
-        const bgSubfolder = bgSlash >= 0 ? name.slice(0, bgSlash) : "";
-        const bgFname = bgSlash >= 0 ? name.slice(bgSlash + 1) : name;
-        bgImg.src = api.apiURL(`/view?filename=${encodeURIComponent(bgFname)}&type=input&subfolder=${encodeURIComponent(bgSubfolder)}&rand=${Date.now()}`);
-        bgImg.onload = () => {
-          node.__rc_setBgImage(bgImg);
-        };
-      }
+      // NOTE (2026-09-04): previously called node.__rc_setBgImage(bgImg) here,
+      // which set a single node-wide background image slot -- every region's
+      // ref upload silently overwrote the previous region's image. Per-region
+      // ref images are now drawn directly inside each region's own box in
+      // draw() via thumbFor(reg.ref_image, node), so no bg-slot write is needed
+      // here; thumbFor's own onload already triggers a redraw once loaded.
       rebuildRows(node);
       const __rc_newSize = node.computeSize();
       node.setSize(__rc_newSize);
@@ -573,6 +568,25 @@ function buildCanvasWidget(node) {
       ctx.globalAlpha = active ? (reg.enable !== false ? 1 : 0.35) : 0.25;
       ctx.fillStyle = hueColor(i, regions.length, bgImage ? 0.08 : 0.15);
       ctx.fillRect(x, y, w, h);
+      if (reg.ref_image) {
+        const refImg = thumbFor(reg.ref_image, node);
+        if (refImg) {
+          // ghost preview: contain-fit inside this region's own box, letterboxed,
+          // ~35% opacity so box color/handles/label stay readable on top.
+          const rir = refImg.width / refImg.height, rbr = w / h;
+          let rdw, rdh, rdx, rdy;
+          if (rir > rbr) { rdw = w; rdh = rdw / rir; rdx = x; rdy = y + (h - rdh) / 2; }
+          else { rdh = h; rdw = rdh * rir; rdx = x + (w - rdw) / 2; rdy = y; }
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(x, y, w, h);
+          ctx.clip();
+          ctx.globalAlpha = (active ? (reg.enable !== false ? 1 : 0.35) : 0.25) * 0.35;
+          ctx.drawImage(refImg, rdx, rdy, rdw, rdh);
+          ctx.restore();
+          ctx.globalAlpha = active ? (reg.enable !== false ? 1 : 0.35) : 0.25;
+        }
+      }
       ctx.lineWidth = 2;
       ctx.strokeStyle = col;
       ctx.strokeRect(x, y, w, h);
