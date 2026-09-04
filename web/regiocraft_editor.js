@@ -256,6 +256,7 @@ function pickAndUploadRef(node, idx) {
       r[idx].ref_image = name;
       writeRegions(node, r);
       delete THUMB_CACHE[name];
+      selectedIdx = idx; // show the freshly-uploaded ref as the bg guide right away
       // NOTE (2026-09-04): previously called node.__rc_setBgImage(bgImg) here,
       // which set a single node-wide background image slot -- every region's
       // ref upload silently overwrote the previous region's image. Per-region
@@ -542,14 +543,26 @@ function buildCanvasWidget(node) {
     ctx.fillStyle = "#15151a";
     ctx.fillRect(0, 0, cw, chh);
 
-    if (bgImage) {
+    const regions = readRegions(node);
+    if (selectedIdx != null && (selectedIdx < 0 || selectedIdx >= regions.length)) selectedIdx = null;
+    const selReg = selectedIdx != null ? regions[selectedIdx] : null;
+    const selRefImg = selReg && selReg.ref_image ? thumbFor(selReg.ref_image, node) : null;
+    // Only the SELECTED region's ref image (if it has one) is ever shown
+    // full-canvas, falling back to the general drag-drop/"load latest output"
+    // bg. This is what lets you actually line the box up against the image
+    // instead of guessing -- and since only one image is shown at a time,
+    // assigning a ref to a 2nd region can't stomp on a 1st region's image;
+    // each region keeps its own ref_image in its own data untouched.
+    const activeBg = selRefImg || bgImage;
+
+    if (activeBg) {
       // "contain" fit: show the WHOLE image, letterboxed if needed -- never
       // crop, since faces can sit anywhere in the frame.
-      const ir = bgImage.width / bgImage.height, cr = cw / chh;
+      const ir = activeBg.width / activeBg.height, cr = cw / chh;
       let dw, dh, dx, dy;
       if (ir > cr) { dw = cw; dh = dw / ir; dx = 0; dy = (chh - dh) / 2; }
       else { dh = chh; dw = dh * ir; dx = (cw - dw) / 2; dy = 0; }
-      ctx.drawImage(bgImage, dx, dy, dw, dh);
+      ctx.drawImage(activeBg, dx, dy, dw, dh);
       ctx.fillStyle = "rgba(0,0,0,0.2)";
       ctx.fillRect(dx, dy, dw, dh);
     }
@@ -557,7 +570,6 @@ function buildCanvasWidget(node) {
     ctx.strokeStyle = "#3a3a42";
     ctx.strokeRect(0.5, 0.5, cw - 1, chh - 1);
 
-    const regions = readRegions(node);
     const splitModeW = node.widgets?.find((w) => w.name === "split_mode");
     const active = !splitModeW || splitModeW.value === "manual";
 
@@ -566,28 +578,9 @@ function buildCanvasWidget(node) {
       const x = (reg.x ?? 0) * cw, y = (reg.y ?? 0) * chh;
       const w = (reg.w ?? 0.3) * cw, h = (reg.h ?? 0.3) * chh;
       ctx.globalAlpha = active ? (reg.enable !== false ? 1 : 0.35) : 0.25;
-      ctx.fillStyle = hueColor(i, regions.length, bgImage ? 0.08 : 0.15);
+      ctx.fillStyle = hueColor(i, regions.length, activeBg ? 0.08 : 0.15);
       ctx.fillRect(x, y, w, h);
-      if (reg.ref_image) {
-        const refImg = thumbFor(reg.ref_image, node);
-        if (refImg) {
-          // ghost preview: contain-fit inside this region's own box, letterboxed,
-          // ~35% opacity so box color/handles/label stay readable on top.
-          const rir = refImg.width / refImg.height, rbr = w / h;
-          let rdw, rdh, rdx, rdy;
-          if (rir > rbr) { rdw = w; rdh = rdw / rir; rdx = x; rdy = y + (h - rdh) / 2; }
-          else { rdh = h; rdw = rdh * rir; rdx = x + (w - rdw) / 2; rdy = y; }
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(x, y, w, h);
-          ctx.clip();
-          ctx.globalAlpha = (active ? (reg.enable !== false ? 1 : 0.35) : 0.25) * 0.35;
-          ctx.drawImage(refImg, rdx, rdy, rdw, rdh);
-          ctx.restore();
-          ctx.globalAlpha = active ? (reg.enable !== false ? 1 : 0.35) : 0.25;
-        }
-      }
-      ctx.lineWidth = 2;
+      ctx.lineWidth = i === selectedIdx ? 3 : 2;
       ctx.strokeStyle = col;
       ctx.strokeRect(x, y, w, h);
       ctx.fillStyle = col;
@@ -595,7 +588,7 @@ function buildCanvasWidget(node) {
       ctx.font = "11px sans-serif";
       ctx.textBaseline = "top";
       ctx.fillStyle = "#111";
-      const label = `${i + 1} ${shortName(reg.lora)}`;
+      const label = `${i + 1} ${shortName(reg.lora)}${reg.ref_image ? " \u{1F5BC}" : ""}`;
       ctx.fillText(label, x + 5, y + 4);
       ctx.globalAlpha = 1;
     });
@@ -610,7 +603,7 @@ function buildCanvasWidget(node) {
       ctx.font = "11px sans-serif";
       ctx.fillText("click '+ Add Region' below to start drawing boxes", 6, chh - 6);
     }
-    if (bgImage) {
+    if (activeBg) {
       ctx.fillStyle = "#000a";
       ctx.fillRect(cw - CLEARBTN - 6, 6, CLEARBTN, CLEARBTN);
       ctx.strokeStyle = "#aaa"; ctx.lineWidth = 1.5;
@@ -620,7 +613,7 @@ function buildCanvasWidget(node) {
     } else {
       ctx.fillStyle = "#666";
       ctx.font = "10px sans-serif";
-      ctx.fillText("drop an image here, or load the latest output, to line up faces", 6, chh - 6);
+      ctx.fillText("select a region, then drop an image / load latest output to line up faces", 6, chh - 6);
     }
   }
 
@@ -702,6 +695,12 @@ function buildCanvasWidget(node) {
 
   // -- interaction: move / resize boxes, click-to-clear-bg, drag-drop image --
   let drag = null;
+  // which region's ref_image (if any) is currently shown full-canvas as the
+  // "line up faces" background guide. Only ONE region's image is ever shown
+  // this way at a time, so assigning a 2nd region's ref never overwrites a
+  // 1st region's -- selecting a different region just swaps which one is
+  // displayed big, each region's own ref_image stays intact in its data.
+  let selectedIdx = null;
   const toNorm = (e) => {
     const r = canvas.getBoundingClientRect();
     return [clamp01((e.clientX - r.left) / r.width), clamp01((e.clientY - r.top) / r.height)];
@@ -717,11 +716,20 @@ function buildCanvasWidget(node) {
     const r = canvas.getBoundingClientRect();
     const [nx, ny] = toNorm(e);
 
-    if (bgImage) {
+    const regionsForClear = readRegions(node);
+    const selRegForClear = selectedIdx != null ? regionsForClear[selectedIdx] : null;
+    const showingRegionBg = !!(selRegForClear && selRegForClear.ref_image);
+    if (showingRegionBg || bgImage) {
       const px = nx * r.width, py = ny * r.height;
       const bx0 = r.width - CLEARBTN - 6, by0 = 6;
       if (px >= bx0 && px <= bx0 + CLEARBTN && py >= by0 && py <= by0 + CLEARBTN) {
-        bgImage = null; draw();
+        if (showingRegionBg) {
+          selRegForClear.ref_image = null;
+          writeRegions(node, regionsForClear);
+        } else {
+          bgImage = null;
+        }
+        draw();
         e.preventDefault(); e.stopPropagation();
         return;
       }
@@ -730,10 +738,12 @@ function buildCanvasWidget(node) {
     const hit = hitTestRegions(node, nx, ny, r);
     if (hit && hit.mode === "move") {
       const reg = readRegions(node)[hit.i];
+      selectedIdx = hit.i;
       drag = { i: hit.i, mode: "move", ox: nx - (reg.x ?? 0), oy: ny - (reg.y ?? 0) };
     } else if (hit) {
       // resize-tl/tr/bl/br/t/b/l/r -- any of the 8 handles, not just bottom-right.
       const reg = readRegions(node)[hit.i];
+      selectedIdx = hit.i;
       drag = {
         i: hit.i, mode: hit.mode, startNorm: { nx, ny },
         start: { x: reg.x ?? 0, y: reg.y ?? 0, w: reg.w ?? 0.3, h: reg.h ?? 0.3 },
@@ -747,6 +757,7 @@ function buildCanvasWidget(node) {
       nb.x = nx; nb.y = ny; nb.w = 0; nb.h = 0;
       regions.push(nb);
       writeRegions(node, regions);
+      selectedIdx = regions.length - 1;
       drag = {
         i: regions.length - 1, mode: "resize-br", isNew: true,
         startNorm: { nx, ny }, start: { x: nx, y: ny, w: 0, h: 0 },
